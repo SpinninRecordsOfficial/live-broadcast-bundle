@@ -2,11 +2,19 @@
 
 namespace Martin1982\LiveBroadcastBundle\Broadcaster;
 
-use Doctrine\Common\Collections\Criteria;
 use Doctrine\ORM\EntityManager;
+use Doctrine\ORM\Query\QueryException;
+use Martin1982\LiveBroadcastBundle\Entity\Channel\BaseChannel;
 use Martin1982\LiveBroadcastBundle\Entity\LiveBroadcast;
-use Martin1982\LiveBroadcastBundle\Streams\Input\File;
-use Martin1982\LiveBroadcastBundle\Streams\Output\Twitch;
+use Martin1982\LiveBroadcastBundle\Event\PostBroadcastEvent;
+use Martin1982\LiveBroadcastBundle\Event\PostBroadcastLoopEvent;
+use Martin1982\LiveBroadcastBundle\Event\PreBroadcastEvent;
+use Martin1982\LiveBroadcastBundle\Event\SwitchMonitorEvent;
+use Martin1982\LiveBroadcastBundle\Exception\LiveBroadcastException;
+use Martin1982\LiveBroadcastBundle\Service\StreamInputService;
+use Martin1982\LiveBroadcastBundle\Service\StreamOutputService;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 /**
  * Class Scheduler
@@ -20,172 +28,246 @@ class Scheduler
     protected $entityManager;
 
     /**
-     * @var string
+     * @var SchedulerCommandsInterface
      */
-    protected $twitchServer;
+    protected $schedulerCommands;
 
     /**
-     * @var string
+     * @var StreamOutputService
      */
-    protected $twitchKey;
+    protected $outputService;
 
     /**
-     * @var string
+     * @var StreamInputService
      */
-    protected $environment;
+    protected $inputService;
+
+    /**
+     * @var EventDispatcherInterface
+     */
+    protected $dispatcher;
+
+    /**
+     * @var LoggerInterface
+     */
+    protected $logger;
+
+    /**
+     * @var RunningBroadcast[]
+     */
+    protected $runningBroadcasts = array();
+
+    /**
+     * @var LiveBroadcast[]
+     */
+    protected $plannedBroadcasts = array();
 
     /**
      * Scheduler constructor.
+     *
      * @param EntityManager $entityManager
-     * @param string        $twitchServer
-     * @param string        $twitchKey
-     * @param string        $environment
+     * @param SchedulerCommandsInterface $schedulerCommands
+     * @param StreamOutputService $outputService
+     * @param StreamInputService $inputService
+     * @param EventDispatcherInterface $dispatcher
+     * @param LoggerInterface $logger
      */
-    public function __construct(EntityManager $entityManager, $twitchServer, $twitchKey, $environment)
-    {
+    public function __construct(
+        EntityManager $entityManager,
+        SchedulerCommandsInterface $schedulerCommands,
+        StreamOutputService $outputService,
+        StreamInputService $inputService,
+        EventDispatcherInterface $dispatcher,
+        LoggerInterface $logger
+    ) {
         $this->entityManager = $entityManager;
-        $this->twitchServer = $twitchServer;
-        $this->twitchKey = $twitchKey;
-        $this->environment = $environment;
+        $this->schedulerCommands = $schedulerCommands;
+        $this->outputService = $outputService;
+        $this->inputService = $inputService;
+        $this->dispatcher = $dispatcher;
+        $this->logger = $logger;
     }
 
     /**
-     * Run streams that need to be running
+     * Run streams that need to be running.
+     * @throws QueryException
+     * @throws LiveBroadcastException
      */
     public function applySchedule()
     {
-        $broadcastRepository = $this->entityManager->getRepository('LiveBroadcastBundle:LiveBroadcast');
-        $broadcasting = $this->getCurrentBroadcasts();
-        $plannedBroadcasts = $this->getPlannedBroadcasts();
-        $runningIds = array();
+        $this->updateRunningBroadcasts();
+        $this->stopExpiredBroadcasts();
+        $this->getPlannedBroadcasts();
+        $this->startPlannedBroadcasts();
 
-        // Stop running broadcasts that have expired
-        foreach ($broadcasting as $running) {
-            $broadcast = $broadcastRepository->find($running['broadcastId']);
+        $postBroadcastLoopEvent = new PostBroadcastLoopEvent();
+        $this->dispatcher->dispatch(PostBroadcastLoopEvent::NAME, $postBroadcastLoopEvent);
+    }
 
-            if ($broadcast->getEndTimestamp() < new \DateTime()) {
-                $this->stopBroadcast($broadcast, $running['pid']);
-            }
-
-            array_push($runningIds, $running['broadcastId']);
+    /**
+     * Start planned broadcasts if not already running.
+     */
+    protected function startPlannedBroadcasts()
+    {
+        foreach ($this->plannedBroadcasts as $plannedBroadcast) {
+            $this->startBroadcastOnChannels($plannedBroadcast);
         }
 
-        // Start planned broadcasts if not already running
-        foreach($plannedBroadcasts as $planned) {
-            $plannedId = $planned->getBroadcastId();
+        $this->updateRunningBroadcasts();
+    }
 
-            if (!in_array($plannedId, $runningIds)) {
-                $broadcast = $broadcastRepository->find($plannedId);
-                $this->startBroadcast($broadcast);
+    /**
+     * @param LiveBroadcast $plannedBroadcast
+     */
+    protected function startBroadcastOnChannels(LiveBroadcast $plannedBroadcast)
+    {
+        $channels = $plannedBroadcast->getOutputChannels();
+
+        foreach ($channels as $channel) {
+            $isChannelBroadcasting = false;
+
+            foreach ($this->runningBroadcasts as $runningBroadcast) {
+                if ($runningBroadcast->isBroadcasting($plannedBroadcast, $channel)) {
+                    $isChannelBroadcasting = true;
+                }
+
+                if ($runningBroadcast->isMonitor()) {
+                    $switchMonitorEvent = new SwitchMonitorEvent($runningBroadcast, $plannedBroadcast, $channel);
+                    $this->dispatcher->dispatch(SwitchMonitorEvent::NAME, $switchMonitorEvent);
+                }
+            }
+
+            if (!$isChannelBroadcasting) {
+                $this->startBroadcast($plannedBroadcast, $channel);
             }
         }
     }
 
     /**
-     * Retrieve what is broadcasting
-     *
-     * @return array
+     * Stop running broadcasts that have expired.
      */
-    public function getCurrentBroadcasts()
+    protected function stopExpiredBroadcasts()
     {
-        $running = array();
-        exec('/bin/ps -C ffmpeg -o pid=,args=', $output);
+        $broadcastRepository = $this->entityManager->getRepository('LiveBroadcastBundle:LiveBroadcast');
 
-        foreach($output as $runningBroadcast) {
-            $runningItem = array(
-                'pid'         => $this->getPid($runningBroadcast),
-                'broadcastId' => $this->getBroadcastId($runningBroadcast),
+        foreach ($this->runningBroadcasts as $runningBroadcast) {
+            $broadcast = $broadcastRepository->find($runningBroadcast->getBroadcastId());
+
+            if (!($broadcast instanceof LiveBroadcast)) {
+                $this->logger->error(
+                    'Unable to stop broadcast, PID not found in database',
+                    array(
+                        'broadcast_id' => $runningBroadcast->getBroadcastId(),
+                        'pid' => $runningBroadcast->getProcessId(),
+                        )
+                );
+                continue;
+            }
+
+            if ($broadcast->isStopOnEndTimestamp() &&
+                $broadcast->getEndTimestamp() < new \DateTime()) {
+                $this->logger->info(
+                    'Stop broadcast',
+                    array(
+                        'broadcast_id' => $broadcast->getBroadcastId(),
+                        'broadcast_name' => $broadcast->getName(),
+                        'pid' => $runningBroadcast->getProcessId(),
+                        )
+                );
+                $this->schedulerCommands->stopProcess($runningBroadcast->getProcessId());
+            }
+        }
+
+        $this->updateRunningBroadcasts();
+    }
+
+    /**
+     * Retrieve what is broadcasting.
+     *
+     * @return RunningBroadcast[]
+     */
+    protected function updateRunningBroadcasts()
+    {
+        $this->runningBroadcasts = array();
+        $this->logger->debug('Retrieve running broadcasts');
+        $processStrings = $this->schedulerCommands->getRunningProcesses();
+
+        foreach ($processStrings as $processString) {
+            $runningItem = new RunningBroadcast(
+                $this->schedulerCommands->getBroadcastId($processString),
+                $this->schedulerCommands->getProcessId($processString),
+                $this->schedulerCommands->getChannelId($processString),
+                $this->schedulerCommands->getEnvironment($processString),
+                $this->schedulerCommands->isMonitorStream($processString)
             );
 
-            if (!empty($runningItem['pid']) && !empty($runningItem['broadcastId'])) {
-                array_push($running, $runningItem);
+            if ($runningItem->isValid($this->schedulerCommands->getKernelEnvironment())) {
+                $this->runningBroadcasts[] = $runningItem;
             }
         }
 
-        return $running;
+        return $this->runningBroadcasts;
     }
 
     /**
-     * Initiate a new broadcast
+     * Initiate a new broadcast.
      *
      * @param LiveBroadcast $broadcast
+     * @param BaseChannel   $channel
      */
-    public function startBroadcast(LiveBroadcast $broadcast)
+    protected function startBroadcast(LiveBroadcast $broadcast, BaseChannel $channel)
     {
-        // @TODO Add factory when supporting other inputs
-        $inputProcessor = new File($broadcast);
-        // @TODO Add factory when supporting other outputs
-        $outputProcessor = new Twitch($this->twitchServer, $this->twitchKey);
+        try {
+            $input = $this->inputService->getInputInterface($broadcast->getInput());
+            $output = $this->outputService->getOutputInterface($channel);
 
-        $streamInput = $inputProcessor->generateInputCmd();
-        $streamOutput = $outputProcessor->generateOutputCmd();
+            $preBroadcastEvent = new PreBroadcastEvent($broadcast, $output);
+            $this->dispatcher->dispatch(PreBroadcastEvent::NAME, $preBroadcastEvent);
 
-        $streamCommand = sprintf('ffmpeg %s %s -metadata env=%s -metadata broadcast_id=%d >/dev/null 2>&1 &', $streamInput, $streamOutput, $this->environment, $broadcast->getBroadcastId());
-        exec($streamCommand);
-    }
+            $this->logger->info(
+                'Start broadcast',
+                array(
+                    'broadcast_id' => $broadcast->getBroadcastId(),
+                    'broadcast_name' => $broadcast->getName(),
+                    'channel_id' => $channel->getChannelId(),
+                    'channel_name' => $channel->getChannelName(),
+                    'output_cmd' => $output->generateOutputCmd(),
+                    )
+            );
 
-    /**
-     * Kill a broadcast
-     *
-     * @param LiveBroadcast $broadcast
-     * @param int           $pid
-     */
-    public function stopBroadcast(LiveBroadcast $broadcast, $pid)
-    {
-        exec(sprintf("kill %d", $pid));
-    }
+            $this->schedulerCommands->startProcess($input->generateInputCmd(), $output->generateOutputCmd(), array(
+                'broadcast_id' => $broadcast->getBroadcastId(),
+                'channel_id' => $channel->getChannelId(),
+            ));
 
-    /**
-     * Get the PID for the broadcast
-     *
-     * @param $processString
-     * @return int|null
-     */
-    protected function getPid($processString)
-    {
-        preg_match('/^[\d]+/', $processString, $pid);
-        if (count($pid) && is_numeric($pid[0])) {
-            return (int)$pid[0];
+            $postBroadcastEvent = new PostBroadcastEvent($broadcast, $output);
+            $this->dispatcher->dispatch(PostBroadcastEvent::NAME, $postBroadcastEvent);
+        } catch (LiveBroadcastException $ex) {
+            $this->logger->error(
+                'Could not start broadcast',
+                array(
+                    'broadcast_id' => $broadcast->getBroadcastId(),
+                    'broadcast_name' => $broadcast->getName(),
+                    'exception' => $ex->getMessage(),
+                    )
+            );
         }
-
-        return null;
     }
 
     /**
-     * Get the currently playing broadcast
-     *
-     * @param $processString
-     * @return string|null
-     */
-    protected function getBroadcastId($processString)
-    {
-        preg_match('/env='.$this->environment.' -metadata broadcast_id=[\d]+/', $processString, $broadcast);
-        if (is_array($broadcast) && is_string($broadcast[0])) {
-            $broadcastDetails = explode('=', $broadcast[0]);
-            return end($broadcastDetails);
-        }
-
-        return null;
-    }
-
-    /**
-     * Get the planned broadcast items
+     * Get the planned broadcast items.
      *
      * @return LiveBroadcast[]
+     *
      * @throws \Doctrine\ORM\Query\QueryException
+     * @throws LiveBroadcastException
      */
     protected function getPlannedBroadcasts()
     {
         $broadcastRepository = $this->entityManager->getRepository('LiveBroadcastBundle:LiveBroadcast');
-        $expr = Criteria::expr();
-        $criterea = Criteria::create();
+        $this->logger->debug('Get planned broadcasts');
+        $this->plannedBroadcasts = $broadcastRepository->getPlannedBroadcasts();
 
-        $criterea->where($expr->andX(
-            $expr->lte('startTimestamp', new \DateTime()),
-            $expr->gte('endTimestamp', new \DateTime())
-        ));
-
-        /** @var LiveBroadcast[] $nowLive */
-        return $broadcastRepository->createQueryBuilder('lb')->addCriteria($criterea)->getQuery()->getResult();
+        return $this->plannedBroadcasts;
     }
 }

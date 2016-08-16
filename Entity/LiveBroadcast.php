@@ -2,19 +2,22 @@
 
 namespace Martin1982\LiveBroadcastBundle\Entity;
 
+use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\ORM\Mapping as ORM;
+use Martin1982\LiveBroadcastBundle\Entity\Channel\BaseChannel;
+use Martin1982\LiveBroadcastBundle\Entity\Media\BaseMedia;
 
 /**
  * Class LiveBroadcast
  * @package Martin1982\LiveBroadcastBundle\Entity
  *
  * @ORM\Table(name="live_broadcast", options={"collate"="utf8mb4_general_ci", "charset"="utf8mb4"})
- * @ORM\Entity()
+ * @ORM\Entity(repositoryClass="Martin1982\LiveBroadcastBundle\Entity\LiveBroadcastRepository")
  */
 class LiveBroadcast
 {
     /**
-     * @var integer
+     * @var int
      *
      * @ORM\Column(name="id", type="integer")
      * @ORM\Id
@@ -32,9 +35,17 @@ class LiveBroadcast
     /**
      * @var string
      *
-     * @ORM\Column(name="video_input_file", type="string", length=128)
+     * @ORM\Column(name="description", type="text", length=65535, nullable=true)
      */
-    private $videoInputFile;
+    private $description;
+
+    /**
+     * @var BaseMedia
+     *
+     * @ORM\OneToOne(targetEntity="Martin1982\LiveBroadcastBundle\Entity\Media\BaseMedia")
+     * @ORM\JoinColumn(name="input_id", referencedColumnName="id")
+     */
+    private $input;
 
     /**
      * @var \DateTime
@@ -51,31 +62,29 @@ class LiveBroadcast
     private $endTimestamp;
 
     /**
-     * @var bool
+     * @var boolean
      *
-     * @ORM\Column(name="live_on_youtube", type="boolean", nullable=false)
+     * @ORM\Column(name="stop_on_end_timestamp", type="boolean", nullable=false)
      */
-    private $liveOnYoutube = false;
+    private $stopOnEndTimestamp = true;
 
     /**
-     * @var bool
+     * @var BaseChannel
      *
-     * @ORM\Column(name="live_on_twitch", type="boolean", nullable=false)
+     * @ORM\ManyToMany(targetEntity="Martin1982\LiveBroadcastBundle\Entity\Channel\BaseChannel")
+     * @ORM\JoinTable(name="broadcasts_channels",
+     *      joinColumns={@ORM\JoinColumn(name="broadcast_id", referencedColumnName="id")},
+     *      inverseJoinColumns={@ORM\JoinColumn(name="channel_id", referencedColumnName="id")}
+     * )
      */
-    private $liveOnTwitch = false;
-
-    /**
-     * @var bool
-     *
-     * @ORM\Column(name="live_on_facebook", type="boolean", nullable=false)
-     */
-    private $liveOnFacebook = false;
+    private $outputChannels;
 
     /**
      * LiveBroadcast constructor.
      */
     public function __construct()
     {
+        $this->outputChannels = new ArrayCollection();
         $this->setStartTimestamp(new \DateTime());
         $this->setEndTimestamp(new \DateTime('+1 hour'));
     }
@@ -108,6 +117,7 @@ class LiveBroadcast
 
     /**
      * @param string $name
+     *
      * @return LiveBroadcast
      */
     public function setName($name)
@@ -120,18 +130,19 @@ class LiveBroadcast
     /**
      * @return string
      */
-    public function getVideoInputFile()
+    public function getDescription()
     {
-        return $this->videoInputFile;
+        return $this->description;
     }
 
     /**
-     * @param string $videoInputFile
+     * @param string $description
+     *
      * @return LiveBroadcast
      */
-    public function setVideoInputFile($videoInputFile)
+    public function setDescription($description)
     {
-        $this->videoInputFile = $videoInputFile;
+        $this->description = $description;
 
         return $this;
     }
@@ -146,6 +157,7 @@ class LiveBroadcast
 
     /**
      * @param \DateTime $startTimestamp
+     *
      * @return LiveBroadcast
      */
     public function setStartTimestamp($startTimestamp)
@@ -165,6 +177,7 @@ class LiveBroadcast
 
     /**
      * @param \DateTime $endTimestamp
+     *
      * @return LiveBroadcast
      */
     public function setEndTimestamp($endTimestamp)
@@ -175,58 +188,89 @@ class LiveBroadcast
     }
 
     /**
-     * @return bool
+     * @param $channels
+     *
+     * @return $this
      */
-    public function getLiveOnYoutube()
+    public function setOutputChannels($channels)
     {
-        return $this->liveOnYoutube;
-    }
-
-    /**
-     * @param bool $liveOnYoutube
-     * @return LiveBroadcast
-     */
-    public function setLiveOnYoutube($liveOnYoutube)
-    {
-        $this->liveOnYoutube = $liveOnYoutube;
+        if (count($channels) > 0) {
+            foreach ($channels as $channel) {
+                $this->addOutputChannel($channel);
+            }
+        }
 
         return $this;
     }
 
     /**
-     * @return bool
+     * @param BaseChannel $channel
+     *
+     * @return $this
      */
-    public function getLiveOnTwitch()
+    public function addOutputChannel(BaseChannel $channel)
     {
-        return $this->liveOnTwitch;
-    }
-
-    /**
-     * @param bool $liveOnTwitch
-     * @return LiveBroadcast
-     */
-    public function setLiveOnTwitch($liveOnTwitch)
-    {
-        $this->liveOnTwitch = $liveOnTwitch;
+        $this->outputChannels->add($channel);
 
         return $this;
     }
 
     /**
-     * @return bool
+     * @param BaseChannel $channel
+     *
+     * @return $this
      */
-    public function getLiveOnFacebook()
+    public function removeOutputChannel(BaseChannel $channel)
     {
-        return $this->liveOnFacebook;
+        $this->outputChannels->remove($channel);
+
+        return $this;
     }
 
     /**
-     * @param bool $liveOnFacebook
+     * @return BaseChannel[]
+     */
+    public function getOutputChannels()
+    {
+        return $this->outputChannels;
+    }
+
+    /**
+     * @return BaseMedia
+     */
+    public function getInput()
+    {
+        return $this->input;
+    }
+
+    /**
+     * @param BaseMedia $input
+     *
      * @return LiveBroadcast
      */
-    public function setLiveOnFacebook($liveOnFacebook)
+    public function setInput(BaseMedia $input)
     {
-        $this->liveOnFacebook = $liveOnFacebook;
+        $this->input = $input;
+
+        return $this;
+    }
+
+    /**
+     * @return boolean
+     */
+    public function isStopOnEndTimestamp()
+    {
+        return $this->stopOnEndTimestamp;
+    }
+
+    /**
+     * @param boolean $stopOnEndTimestamp
+     *
+     * @return LiveBroadcast
+     */
+    public function setStopOnEndTimestamp($stopOnEndTimestamp)
+    {
+        $this->stopOnEndTimestamp = $stopOnEndTimestamp;
 
         return $this;
     }

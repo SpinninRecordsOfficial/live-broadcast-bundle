@@ -6,10 +6,48 @@ services:
               manager_type: orm
               group: "Live"
               label: "Live Broadcasts"
-
         arguments:
             - ~
             - Martin1982\LiveBroadcastBundle\Entity\LiveBroadcast
             - ~
         calls:
             - [ setTranslationDomain, [LiveBroadcastBundle]]
+
+    sonata.admin.channel:
+        class: Martin1982\LiveBroadcastBundle\Admin\ChannelAdmin
+        tags:
+            - name: sonata.admin
+              manager_type: orm
+              group: "Live"
+              label: "Channels"
+        arguments:
+            - ~
+            - Martin1982\LiveBroadcastBundle\Entity\Channel\BaseChannel
+            - LiveBroadcastBundle:CRUD
+        calls:
+            - [setSubClasses, [ { "Twitch": Martin1982\LiveBroadcastBundle\Entity\Channel\ChannelTwitch, "Facebook": Martin1982\LiveBroadcastBundle\Entity\Channel\ChannelFacebook, "YouTube": Martin1982\LiveBroadcastBundle\Entity\Channel\ChannelYouTube, "Ustream": Martin1982\LiveBroadcastBundle\Entity\Channel\ChannelUstream } ] ]
+
+    sonata.admin.streaminput:
+        class: Martin1982\LiveBroadcastBundle\Admin\InputAdmin
+        tags:
+            - name: sonata.admin
+              manager_type: orm
+              group: "Live"
+              label: "Inputs"
+        arguments:
+            - ~
+            - Martin1982\LiveBroadcastBundle\Entity\Media\BaseMedia
+            - ~
+        calls:
+            - [setSubClasses, [ { "File": Martin1982\LiveBroadcastBundle\Entity\Media\MediaFile, "URL": Martin1982\LiveBroadcastBundle\Entity\Media\MediaUrl } ] ]
+
+    sonata.block.service.youtubeauth:
+        class: Martin1982\LiveBroadcastBundle\Admin\Block\YouTubeBlockService
+        arguments:
+            - sonata.block.service.youtubeauth
+            - "@templating"
+            - "@live.broadcast.youtubeapi.service"
+            - "@request_stack"
+            - "@live.broadcast.googleredirect.service"
+        tags:
+            - { name: sonata.block }

@@ -1,7 +1,7 @@
 <?php
+
 namespace Martin1982\LiveBroadcastBundle\DependencyInjection;
 
-use Symfony\Component\Config\Definition\Builder\ArrayNodeDefinition;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
@@ -19,32 +19,26 @@ class Configuration implements ConfigurationInterface
         $treeBuilder = new TreeBuilder();
         $rootNode = $treeBuilder->root('live_broadcast');
 
-        $this->addTwitchConfig($rootNode);
-
-        return $treeBuilder;
-    }
-
-    /**
-     * Set Twitch configuration nodes
-     *
-     * @param ArrayNodeDefinition $rootNode
-     */
-    protected function addTwitchConfig(ArrayNodeDefinition $rootNode)
-    {
         $rootNode
             ->children()
-                ->arrayNode('twitch')
+                ->arrayNode('facebook')
+                    ->canBeEnabled()
                     ->children()
-                        ->scalarNode('stream_server_fqdn')
-                            ->defaultValue('live.twitch.tv')
-                            ->cannotBeEmpty()
-                        ->end()
-                        ->scalarNode('stream_key')
-                            ->isRequired()
-                            ->cannotBeEmpty()
-                        ->end()
+                        ->scalarNode('application_id')->defaultNull()->end()
+                        ->scalarNode('application_secret')->defaultNull()->end()
                     ->end()
                 ->end()
-            ->end();
+                ->arrayNode('youtube')
+                    ->canBeEnabled()
+                    ->children()
+                        ->scalarNode('client_id')->defaultNull()->end()
+                        ->scalarNode('client_secret')->defaultNull()->end()
+                        ->scalarNode('redirect_route')->defaultNull()->end()
+                    ->end()
+                ->end()
+            ->end()
+        ;
+
+        return $treeBuilder;
     }
 }
